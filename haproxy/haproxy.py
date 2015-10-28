@@ -31,6 +31,7 @@ class Haproxy(object):
     envvar_extra_global_settings = os.getenv("EXTRA_GLOBAL_SETTINGS")
     envvar_extra_default_settings = os.getenv("EXTRA_DEFAULT_SETTINGS")
     envvar_extra_bind_settings = os.getenv("EXTRA_BIND_SETTINGS")
+    envvar_extra_backend_settings = os.getenv("EXTRA_BACKEND_SETTINGS")
     envvar_http_basic_auth = os.getenv("HTTP_BASIC_AUTH")
 
     # envvar overwritable
@@ -261,6 +262,21 @@ class Haproxy(object):
 
             if userlist:
                 cfg["userlist haproxy_userlist"] = userlist
+
+        if Haproxy.envvar_extra_backend_settings:
+            settings = re.split(r'(?<!\\),', Haproxy.envvar_extra_backend_settings)
+            backends = {}
+            for setting in settings:
+                term = setting.split(":", 1)
+                if len(term) == 2:
+                    service_alias = term[0].strip()
+                    configuration = term[1].strip()
+                    if "backend SERVICE_" + service_alias not in backends:
+                        backends["backend SERVICE_%s" % service_alias] = list()
+                    backends["backend SERVICE_%s" % service_alias].append(configuration.replace("\,", ","))
+            for backend in backends:
+                cfg[backend] = backends[backend]
+
         return cfg
 
     def _config_tcp(self):
