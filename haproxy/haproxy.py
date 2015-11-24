@@ -33,6 +33,8 @@ class Haproxy(object):
     envvar_extra_bind_settings = os.getenv("EXTRA_BIND_SETTINGS")
     envvar_extra_backend_settings = os.getenv("EXTRA_BACKEND_SETTINGS")
     envvar_http_basic_auth = os.getenv("HTTP_BASIC_AUTH")
+    envvar_monitor_uri = os.getenv("MONITOR_URI")
+    envvar_monitor_port = os.getenv("MONITOR_PORT")
 
     # envvar overwritable
     envvar_balance = os.getenv("BALANCE", "roundrobin")
@@ -338,6 +340,7 @@ class Haproxy(object):
         return cfgs
 
     def _config_frontend(self):
+        monitor_uri_configured = False
         cfg = OrderedDict()
         if self.specs.get_vhosts():
             frontends_dict = {}
@@ -366,6 +369,11 @@ class Haproxy(object):
 
                     # add websocket acl rule
                     frontends_dict[port].append("acl is_websocket hdr(Upgrade) -i WebSocket")
+
+                    # add monitor uri
+                    if port == Haproxy.envvar_monitor_port and Haproxy.envvar_monitor_uri:
+                        frontends_dict[port].append("monitor-uri %s" % Haproxy.envvar_monitor_uri)
+                        monitor_uri_configured = True
 
                 acl_rule = []
                 # calculate virtual host rule
@@ -428,8 +436,18 @@ class Haproxy(object):
                     frontend.append(
                         ("bind :443 %s %s" % (self.ssl, self.extra_bind_settings.get('443', ""))).strip())
                     frontend.append("reqadd X-Forwarded-Proto:\ https")
+
+                if Haproxy.envvar_monitor_uri and (
+                        Haproxy.envvar_monitor_port == '80' or Haproxy.envvar_monitor_port == '443'):
+                    frontend.append("monitor-uri %s" % Haproxy.envvar_monitor_uri)
+                    monitor_uri_configured = True
+
                 frontend.append("default_backend default_service")
                 cfg["frontend default_frontend"] = frontend
+
+        if not monitor_uri_configured and Haproxy.envvar_monitor_port and Haproxy.envvar_monitor_uri:
+            cfg["frontend monitor"] = ["bind :%s" % Haproxy.envvar_monitor_port,
+                                       "monitor-uri %s" % Haproxy.envvar_monitor_uri]
 
         return cfg
 
