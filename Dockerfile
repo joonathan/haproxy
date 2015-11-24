@@ -1,14 +1,15 @@
 FROM ubuntu:trusty
-MAINTAINER Feng Honglin <hfeng@tutum.co>
+MAINTAINER Joonathan Mägi <joonathan@fiji.ee>
 
 # Install pip and haproxy
-RUN echo 'deb http://ppa.launchpad.net/vbernat/haproxy-1.5/ubuntu trusty main' >> /etc/apt/sources.list && \
-    echo 'deb-src http://ppa.launchpad.net/vbernat/haproxy-1.5/ubuntu trusty main' >> /etc/apt/sources.list && \
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    echo 'deb http://ppa.launchpad.net/vbernat/haproxy-1.6/ubuntu trusty main' >> /etc/apt/sources.list && \
+    echo 'deb-src http://ppa.launchpad.net/vbernat/haproxy-1.6/ubuntu trusty main' >> /etc/apt/sources.list && \
     apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 505D97A41C61B9CD && \
     apt-get update && \
     apt-get install -y --no-install-recommends haproxy python-pip && \
     apt-get clean && \
-    pip install python-tutum==0.16.21 && \
+    pip install python-tutum==0.20.0 && \
     rm -rf /var/lib/apt/lists/* && \
     echo '#!/bin/sh' > /reload.sh && \
     echo 'kill -USR1 $(cat /tmp/tutum-haproxy.pid)' >> /reload.sh && \
