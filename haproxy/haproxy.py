@@ -1,11 +1,12 @@
-import os
-import logging
-import subprocess
-import time
 import copy
+import logging
+import os
 import re
+import subprocess
 import thread
+import time
 from collections import OrderedDict
+from multiprocessing.pool import ThreadPool
 
 import tutum
 
@@ -17,6 +18,7 @@ logger = logging.getLogger("haproxy")
 class Haproxy(object):
     # envvar
     envvar_default_ssl_cert = os.getenv("DEFAULT_SSL_CERT") or os.getenv("SSL_CERT")
+    envvar_extra_ssl_certs = os.getenv("EXTRA_SSL_CERTS")
     envvar_default_ca_cert = os.getenv("CA_CERT")
     envvar_maxconn = os.getenv("MAXCONN", "4096")
     envvar_mode = os.getenv("MODE", "http")
@@ -50,10 +52,14 @@ class Haproxy(object):
     cls_container_uri = os.getenv("TUTUM_CONTAINER_API_URI")
     cls_service_uri = os.getenv("TUTUM_SERVICE_API_URI")
     cls_tutum_auth = os.getenv("TUTUM_AUTH")
-    cls_linked_services = None
+    cls_linked_services = []
     cls_cfg = None
     cls_haproxy_process = None
     cls_certs = []
+
+    cls_service_name_match = re.compile(r"(.+)_\d+$")
+
+    cls_linked_container_object_cache = {}
 
     def __init__(self):
         Haproxy.extra_bind_settings = Haproxy._parse_extra_bind_settings(Haproxy.envvar_extra_bind_settings)
@@ -62,13 +68,62 @@ class Haproxy(object):
         self.routes_added = []
         self.require_default_route = False
         if Haproxy.cls_container_uri and Haproxy.cls_service_uri and Haproxy.cls_tutum_auth:
-            container = self.fetch_tutum_obj(Haproxy.cls_container_uri)
-            service = self.fetch_tutum_obj(Haproxy.cls_service_uri)
-            Haproxy.cls_linked_services = [srv.get("to_service") for srv in service.linked_to_service]
-            logger.info("Current links: %s", ", ".join(
-                ["%s(%s)" % (srv.get("name"), parse_uuid_from_resource_uri(srv.get("to_service"))) for srv in
-                 service.linked_to_service]))
-            self.specs = Specs(container, service)
+            haproxy_container = self.fetch_tutum_obj(Haproxy.cls_container_uri)
+
+            links = {}
+            for link in haproxy_container.linked_to_container:
+                linked_container_uri = link["to_container"]
+                linked_container_name = link["name"].upper().replace("-", "_")
+                linked_container_service_name = linked_container_name
+
+                match = Haproxy.cls_service_name_match.match(linked_container_name)
+                if match:
+                    linked_container_service_name = match.group(1)
+
+                links[linked_container_uri] = {
+                    "container_name": linked_container_name,
+                    "container_uri": linked_container_uri,
+                    "service_name": linked_container_service_name,
+                    "endpoints": link["endpoints"]
+                }
+
+            new_container_object_uris = filter(lambda x: x not in Haproxy.cls_linked_container_object_cache, links)
+            pool = ThreadPool(processes=10)
+            new_container_objects = pool.map(Haproxy.fetch_tutum_obj, new_container_object_uris)
+            for i, container_uri in enumerate(new_container_object_uris):
+                Haproxy.cls_linked_container_object_cache[container_uri] = new_container_objects[i]
+
+            linked_containers =[Haproxy.cls_linked_container_object_cache[link["to_container"]] for link in haproxy_container.linked_to_container]
+
+            for linked_container in linked_containers:
+                linked_container_uri = linked_container.resource_uri
+                linked_container_service_uri = linked_container.service
+                linked_container_name = linked_container.name.upper().replace("-", "_")
+                linked_container_envvars = {}
+
+                for envvar in linked_container.container_envvars:
+                    if "_ENV_" not in envvar['key']:
+                        linked_container_envvars["%s_ENV_%s" % (linked_container_name, envvar['key'])] = envvar['value']
+
+                links[linked_container_uri]["service_uri"] = linked_container_service_uri
+                links[linked_container_uri]["container_envvars"] = linked_container_envvars
+
+            linked_services = []
+            for link in links.itervalues():
+                if link["service_uri"] not in linked_services:
+                    linked_services.append(link["service_uri"])
+
+            logger.info("Service links: %s", ", ".join(
+                    sorted(set(["%s(%s)" % (
+                        link.get("service_name"), parse_uuid_from_resource_uri(link.get("service_uri")))
+                                for link in links.itervalues()]))))
+            logger.info("Container links: %s", ", ".join(
+                    sorted(set(["%s(%s)" % (
+                        link.get("container_name"), parse_uuid_from_resource_uri(link.get("container_uri")))
+                                for link in links.itervalues()]))))
+
+            Haproxy.cls_linked_services = linked_services
+            self.specs = Specs(links)
         else:
             logger.info("Loading HAProxy definition from environment variables")
             Haproxy.cls_linked_services = None
@@ -145,6 +200,7 @@ class Haproxy(object):
             certs.append(self.envvar_default_ssl_cert)
         if self.envvar_default_ca_cert:
             cacerts.append(self.envvar_default_ca_cert)
+        certs.extend(self.get_extra_ssl_certs())
         certs.extend(self.specs.get_default_ssl_cert())
         certs.extend(self.specs.get_ssl_cert())
         if certs:
@@ -159,6 +215,13 @@ class Haproxy(object):
                 self.ssl_updated = True
                 self._save_ca_certs(cacerts)
             self.ssl += " ca-file /cacerts/cert0.pem verify required"
+
+    def get_extra_ssl_certs(self):
+        extra_certs = []
+        if self.envvar_extra_ssl_certs:
+            for cert_name in self.envvar_extra_ssl_certs.split():
+                extra_certs.append(os.getenv(cert_name))
+        return extra_certs
 
     def _save_certs(self, certs):
         try:
@@ -379,9 +442,8 @@ class Haproxy(object):
                 # calculate virtual host rule
                 host_rules = []
                 host = vhost["host"].strip("/")
-                if host == "*":
-                    pass
-                elif "*" in host:
+
+                if "*" in host:
                     host_rules.append("acl host_rule_%d hdr_reg(host) -i ^%s$" % (
                         rule_counter, host.replace(".", "\.").replace("*", ".*")))
                     host_rules.append("acl host_rule_%d_port hdr_reg(host) -i ^%s:%s$" % (
@@ -396,8 +458,8 @@ class Haproxy(object):
                 path = vhost["path"].strip()
                 if "*" in path:
                     path_rules.append(
-                        "acl path_rule_%d path_reg -i ^%s$" % (
-                            rule_counter, path.replace(".", "\.").replace("*", ".*")))
+                            "acl path_rule_%d path_reg -i ^%s$" % (
+                                rule_counter, path.replace(".", "\.").replace("*", ".*")))
                 elif path:
                     path_rules.append("acl path_rule_%d path -i %s" % (rule_counter, path))
                 acl_rule.extend(path_rules)
@@ -434,14 +496,15 @@ class Haproxy(object):
                 frontend = [("bind :80 %s" % self.extra_bind_settings.get('80', "")).strip()]
                 if self.ssl and self:
                     frontend.append(
-                        ("bind :443 %s %s" % (self.ssl, self.extra_bind_settings.get('443', ""))).strip())
+                            ("bind :443 %s %s" % (self.ssl, self.extra_bind_settings.get('443', ""))).strip())
                     frontend.append("reqadd X-Forwarded-Proto:\ https")
 
                 if Haproxy.envvar_monitor_uri and (
-                        Haproxy.envvar_monitor_port == '80' or Haproxy.envvar_monitor_port == '443'):
+                                Haproxy.envvar_monitor_port == '80' or Haproxy.envvar_monitor_port == '443'):
                     frontend.append("monitor-uri %s" % Haproxy.envvar_monitor_uri)
                     monitor_uri_configured = True
 
+                frontend.append("maxconn %s" % Haproxy.envvar_maxconn)
                 frontend.append("default_backend default_service")
                 cfg["frontend default_frontend"] = frontend
 
