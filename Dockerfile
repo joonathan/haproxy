@@ -9,7 +9,7 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -y --no-install-recommends haproxy python-pip && \
     apt-get clean && \
-    pip install python-tutum==0.20.0 && \
+    pip install python-tutum==0.21.2 && \
     rm -rf /var/lib/apt/lists/* && \
     echo '#!/bin/sh' > /reload.sh && \
     echo 'kill -USR1 $(cat /tmp/tutum-haproxy.pid)' >> /reload.sh && \
